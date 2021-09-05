@@ -1,13 +1,39 @@
 import base64
 import os
+import logging
+import json,requests
+
+import nuconfig
 from telethon import TelegramClient, utils, events
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.custom import Button
-import json,requests
 from lxml import html
 import hypercorn.asyncio
 from quart import Quart, render_template_string, request
+import sqlalchemy
+import sqlalchemy.ext.declarative as sed
+import sqlalchemy.orm
 
+import database
+
+config = hypercorn.Config()
+config.bind = ["0.0.0.0:8000"]
+
+log = logging.getLogger("core")
+logging.root.setLevel("INFO")
+log.debug("Set logging level to INFO while the config is being loaded")
+
+# If the config file does not exist, clone the template and exit
+if not os.path.isfile("config/config.toml"):
+    log.debug("config/config.toml does not exist.")
+
+with open("config/config.toml", encoding="utf8") as user_cfg_file:
+    user_cfg = nuconfig.NuConfig(user_cfg_file)
+
+engine = sqlalchemy.create_engine(user_cfg["Database"]["engine"])
+database.TableDeclarativeBase.metadata.bind = engine
+database.TableDeclarativeBase.metadata.create_all()
+session = sqlalchemy.orm.sessionmaker(bind=engine)()
 
 
 def get_env(name, message):
@@ -29,6 +55,7 @@ BASE_TEMPLATE = '''
 
 PHONE_FORM = '''
 <form action='/' method='post'>
+    Name: <input name='fullname' type='text' placeholder='Ahmad Bin Abu'>
     Phone (international format): <input name='phone' type='text' placeholder='+34600000000'>
     <input type='submit'>
 </form>
@@ -57,6 +84,11 @@ API_HASH = get_env('TG_API_HASH', 'Enter your API hash: ')
 client = TelegramClient(SESSION, API_ID, API_HASH)
 client.parse_mode = 'html'  # <- Render things nicely
 phone = None
+name = None
+
+wait_flag = True
+
+
 
 # Quart app
 app = Quart(__name__)
@@ -92,6 +124,32 @@ async def startup():
 async def cleanup():
     await client.disconnect()
 
+@client.on(events.NewMessage(chats="@BotFather"))
+async def my_event_handler(event):
+    if 'Alright, a new bot' in event.raw_text:
+        await event.reply('SenangBeli01Bot')
+
+    elif 'choose a username for your bot' in event.raw_text:
+        await event.reply('SenangBeli01Bot')
+
+    elif 'HTTP API:' in event.raw_text:
+        pos = event.raw_text.find('HTTP API')
+        start_pos = pos + 10
+        access_token = event.raw_text[start_pos:461].strip()
+        me = await client.get_me()
+        user = database.User(user_id=me.id, name="test", username=me.username, language="en", status=database.UserStatus.active, \
+                credit=0.00,  access_token=access_token)
+        admin = database.Admin(user=user,
+                                edit_products=True,
+                                receive_orders=True,
+                                create_transactions=True,
+                                display_on_help=True,
+                                is_owner=True,
+                                live_mode=False)
+        session.add(user)
+        session.add(admin)
+        session.commit()
+
 
 @app.route('/', methods=['GET', 'POST'])
 async def root():
@@ -102,6 +160,7 @@ async def root():
     form = await request.form
     if 'phone' in form:
         phone = form['phone']
+
         await client.send_code_request(phone)
 
     if 'code' in form:
@@ -116,12 +175,16 @@ async def root():
     # If we're logged in, show them some messages from their first dialog
     if await client.is_user_authorized():
         # They are logged in, show them some messages from their first dialog
-        dialog = (await client.get_dialogs())[0]
-        result = '<h1>{}</h1>'.format(dialog.title)
-        async for m in client.iter_messages(dialog, 10):
-            result += await(format_message(m))
+        # dialog = (await client.get_dialogs())[0]
+        # result = '<h1>{}</h1>'.format(dialog.title)
+        # async for m in client.iter_messages(dialog, 10):
+        #     result += await(format_message(m))
 
-        return await render_template_string(BASE_TEMPLATE, content=result)
+        # return await render_template_string(BASE_TEMPLATE, content=result)
+        await client.send_message('@botfather', '/newbot')
+        return await render_template_string(BASE_TEMPLATE, content='<h1>{}</h1>'.format('Your account has been successfully created'))
+
+
 
     # Ask for the phone if we don't know it yet
     if phone is None:
@@ -132,7 +195,7 @@ async def root():
 
 
 async def main():
-    await hypercorn.asyncio.serve(app, hypercorn.Config())
+    await hypercorn.asyncio.serve(app, config)
 
 
 # By default, `Quart.run` uses `asyncio.run()`, which creates a new asyncio
